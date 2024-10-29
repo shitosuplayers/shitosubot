@@ -1,3 +1,2 @@
-members.json
-venv/
-token.txt
+.venv/
+.env
