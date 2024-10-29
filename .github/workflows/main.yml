@@ -26,5 +26,4 @@ jobs:
           cd /home/pi/discord-bots/shitosubot/
           git pull origin main
           git status
-          npm install --only=prod
           sudo systemctl restart shitosubot
