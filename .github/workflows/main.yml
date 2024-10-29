@@ -2,7 +2,7 @@ name: Deploy
 
 # Controls when the action will run. 
 on:
-  # Triggers the workflow on push or pull request events but only for the master branch
+  # Triggers the workflow on push or pull request events but only for the main branch
   push:
     branches: [ main ]
 
@@ -14,7 +14,11 @@ jobs:
     runs-on: ubuntu-latest
 
     # Steps represent a sequence of tasks that will be executed as part of the job
-    steps:       
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v2
+
+    # Step 3: Deploy using SSH
     - name: Deploy using ssh
       uses: appleboy/ssh-action@master
       with:
@@ -26,4 +30,11 @@ jobs:
           cd /home/pi/discord-bots/shitosubot/
           git pull origin main
           git status
+          # Create a virtual environment if it doesn't exist
+          if [ ! -d ".venv" ]; then
+            /usr/bin/python3 -m venv .venv  # Adjust the Python path if necessary
+          fi
+          # Activate the virtual environment and install dependencies
+          source .venv/bin/activate
+          pip install -r requirements.txt
           sudo systemctl restart shitosubot
