@@ -1,7 +1,8 @@
 import discord
-import time
 import os
 import aiomysql
+import aiohttp
+import time
 from discord.ext import commands
 from datetime import datetime
 from dotenv import load_dotenv
@@ -18,9 +19,37 @@ async def create_db_pool():
         db=os.getenv('DB_NAME')
     )
 
+async def get_osu_access_token():
+    """
+    Obtain an access token from osu! API v2.
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            'https://osu.ppy.sh/oauth/token',
+            json={
+                'client_id': os.getenv('OSU_CLIENT_ID'),
+                'client_secret': os.getenv('OSU_CLIENT_SECRET'),
+                'grant_type': 'client_credentials',
+                'scope': 'public'
+            }
+        ) as response:
+            data = await response.json()
+            return data.get('access_token')
+
+async def is_valid_osu_id(osu_id: str, access_token: str) -> bool:
+    """
+    Check if the given osu! user ID is valid using the osu! API.
+    """
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f'https://osu.ppy.sh/api/v2/users/{osu_id}',
+            headers={'Authorization': f'Bearer {access_token}'}
+        ) as response:
+            return response.status == 200
+
 # Set up the intents
 intents = discord.Intents.default()
-intents.message_content = True  # Enable the intent to read message content (required for command handling)
+intents.message_content = True
 intents.guilds = True
 intents.members = True
 
@@ -29,23 +58,22 @@ bot = commands.Bot(command_prefix="!", intents=intents, case_insensitive=True)
 
 @bot.event
 async def on_ready():
-    bot.db_pool = await create_db_pool()  # Store pool in bot instance
-    await bot.change_presence(activity=discord.Game(name="osu!"))  # Set the bot's status to "Playing osu!"
+    bot.db_pool = await create_db_pool()
+    await bot.change_presence(activity=discord.Game(name="osu!"))
     print(f"Bot is online as {bot.user}")
-    await bot.tree.sync()  # Sync the slash commands
+    await bot.tree.sync()
     print('Slash commands synced.')
-
 
 @bot.tree.command(name="register", description="Register to sop! with your osu! ID.")
 async def register(interaction: discord.Interaction, osu_id: str, discord_user: Optional[str] = None):
     # Determine the target user ID based on input
     if discord_user:
         if discord_user.startswith("<@") and discord_user.endswith(">"):
-            target_user_id = int(discord_user[2:-1])  # Extract the Discord user ID from the mention
+            target_user_id = int(discord_user[2:-1])
         else:
-            target_user_id = int(discord_user)  # Assume the input is a plain numeric ID
+            target_user_id = int(discord_user)
     else:
-        target_user_id = interaction.user.id  # Default to interaction user's Discord ID if no ID is provided
+        target_user_id = interaction.user.id
     
     # Check if the user is an admin or if they are registering their own ID
     is_admin = interaction.user.guild_permissions.administrator
@@ -53,9 +81,25 @@ async def register(interaction: discord.Interaction, osu_id: str, discord_user: 
         await interaction.response.send_message("You don't have permission to register someone else's user.", ephemeral=True)
         return
 
+    # Get osu! access token and validate osu! ID
+    access_token = await get_osu_access_token()
+    if not access_token:
+        await interaction.response.send_message("Could not authenticate with osu! API.", ephemeral=True)
+        return
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            f'https://osu.ppy.sh/api/v2/users/{osu_id}',
+            headers={'Authorization': f'Bearer {access_token}'}
+        ) as osu_response:
+            if osu_response.status != 200:
+                await interaction.response.send_message("The provided osu! ID is invalid. Please try again.", ephemeral=True)
+                return
+            osu_data = await osu_response.json()
+
     async with bot.db_pool.acquire() as connection:
         async with connection.cursor() as cursor:
-            # Check if the user is already registered by Discord ID or osu! ID
+            # Check if the user is already registered
             await cursor.execute(
                 "SELECT discord_user_id, osu_user_id FROM members WHERE discord_user_id = %s OR osu_user_id = %s",
                 (target_user_id, osu_id)
@@ -63,19 +107,12 @@ async def register(interaction: discord.Interaction, osu_id: str, discord_user: 
             existing_user = await cursor.fetchone()
 
             if existing_user:
-                registered_discord_id, registered_osu_id = existing_user
-                message_parts = []
-                if registered_discord_id == target_user_id:
-                    message_parts.append("You are already registered.")
-                else:
-                    message_parts.append("Someone else is registered with that osu! ID. Please contact staff if you think this is incorrect.")
-
-                await interaction.response.send_message(" ".join(message_parts))
+                await interaction.response.send_message("You're already registered.", ephemeral=True)
                 return
 
             # Determine the role based on the target user's roles
             target_user = interaction.guild.get_member(target_user_id)
-            role_name = "Member"  # Default role
+            role_name = "Member"
             if target_user:
                 if any(role.id == 994947833931235421 for role in target_user.roles):
                     role_name = "Owner"
@@ -84,19 +121,34 @@ async def register(interaction: discord.Interaction, osu_id: str, discord_user: 
                 elif any(role.id == 1200081565787639848 for role in target_user.roles):
                     role_name = "Content Manager"
 
-            try:
-                # Insert new user registration with role
-                await cursor.execute(
-                    "INSERT INTO members (discord_user_id, discord_username, osu_user_id, role) VALUES (%s, %s, %s, %s)",
-                    (target_user_id, target_user.name if target_user else "Unknown", int(osu_id), role_name)
-                )
-                await connection.commit()  # Commit the transaction
+            # Insert new user registration with role
+            await cursor.execute(
+                "INSERT INTO members (discord_user_id, discord_username, osu_user_id, role) VALUES (%s, %s, %s, %s)",
+                (target_user_id, target_user.name if target_user else "Unknown", int(osu_id), role_name)
+            )
+            await connection.commit()
 
-            except Exception:
-                await interaction.response.send_message("An error occurred while processing your request. Please check your input.", ephemeral=True)
-                return
+    # Construct and send embed response
+    embed = discord.Embed(
+        title="shitosuplayers.xyz/members",
+        url="https://shitosuplayers.xyz/members",
+        description="Successfully registered to the sop! members list!",
+        color=discord.Color.from_str("#B200FF")
+    )
+    embed.set_author(
+    name=f"{osu_data['username']} (#{osu_data['statistics']['global_rank']:,})",
+        icon_url=osu_data['avatar_url'],
+        url=f"https://osu.ppy.sh/users/{osu_data['id']}"
+    )
+    embed.set_thumbnail(url=osu_data['avatar_url'])
+    embed.set_footer(
+        text="sop!",
+        icon_url="https://cdn.discordapp.com/icons/689223029737259038/a_2d96c74a1bbc8414daf60afcb9218de4.webp?size=96"
+    )
+    embed.timestamp = discord.utils.utcnow()
 
-    await interaction.response.send_message(f"Registered osu! user ID: {osu_id} as {role_name}.")
+    await interaction.response.send_message(embed=embed)
+
 
 
 
