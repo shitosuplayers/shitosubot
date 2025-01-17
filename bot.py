@@ -239,5 +239,12 @@ async def uptime(interaction: discord.Interaction):
 
     await interaction.response.send_message(uptime_msg)
 
+@bot.tree.command(name="upload skin", description="Upload skin into shitosuplayers github page")
+async def upload_skin(interaction: discord.Interaction, file: discord.Attachment):
+    if not file or not file.filename.endswith('.osk'):
+        await interaction.response.send_message("Please upload a valid `.osk` file.", ephemeral=True)
+
+    await interaction.response.send_message("Skin has been received as an `.osk` file." ephemeral=True)
+
 # Run the bot with the provided token
 bot.run(os.getenv('BOT_TOKEN'))
