@@ -3,6 +3,7 @@ import os
 import aiomysql
 import aiohttp
 import time
+import base64
 from discord.ext import commands
 from datetime import datetime
 from dotenv import load_dotenv
@@ -35,6 +36,7 @@ async def get_osu_access_token():
         ) as response:
             data = await response.json()
             return data.get('access_token')
+
 
 async def is_valid_osu_id(osu_id: str, access_token: str) -> bool:
     """
@@ -239,12 +241,134 @@ async def uptime(interaction: discord.Interaction):
 
     await interaction.response.send_message(uptime_msg)
 
-@bot.tree.command(name="upload skin", description="Upload skin into shitosuplayers github page")
+async def get_github_details():
+    return {
+        "GITHUB_API_URL": "https://api.github.com/orgs/shitosuplayers",
+        "REPO_OWNER": "shitosuplayers",
+        "REPO_NAME": "osu-skins",
+        "BRANCH_NAME": "main",
+        "token": os.getenv('GITHUB_TOKEN') 
+    }
+
+@bot.tree.command(name="upload-skin", description="Upload skin into shitosuplayers github page")
 async def upload_skin(interaction: discord.Interaction, file: discord.Attachment):
     if not file or not file.filename.endswith('.osk'):
         await interaction.response.send_message("Please upload a valid `.osk` file.", ephemeral=True)
+        return
 
-    await interaction.response.send_message("Skin has been received as an `.osk` file.", ephemeral=True)
+    temp_path = f"temp_{file.filename}"
+    await file.save(temp_path)
+
+    # Get GitHub details
+    github_details = await get_github_details()
+    GITHUB_API_URL = github_details["GITHUB_API_URL"]
+    REPO_OWNER = github_details["REPO_OWNER"]
+    REPO_NAME = github_details["REPO_NAME"]
+    BRANCH_NAME = github_details["BRANCH_NAME"]
+    GITHUB_TOKEN = github_details["token"]
+
+    # Define headers for authorization
+    headers = {
+        "Authorization": f"token {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github.v3+json"
+    }
+
+    github_file_path = f"skins/{file.filename}"
+    commit_message = f"Add new skin: {file.filename}"
+
+    with open(temp_path, "rb") as f:
+        content = f.read()
+
+    # Encode the content in base64
+    encoded_content = base64.b64encode(content).decode('utf-8')
+
+    # IMPORTANT NOT FINDING README FILE
+    # Fetch README.md
+    async with aiohttp.ClientSession() as session:
+        # Check if the repository exists
+        repo_url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}"
+        async with session.get(repo_url, headers=headers) as repo_response:
+            if repo_response.status == 404:
+                await interaction.response.send_message("The specified repository was not found. Please ensure the repository name and owner are correct.", ephemeral=True)
+                return
+            elif repo_response.status == 401:
+                await interaction.response.send_message("Unauthorized access. Please check if your GitHub token is valid.", ephemeral=True)
+                return
+            elif repo_response.status == 403:
+                await interaction.response.send_message("Access to the repository is forbidden. Ensure your GitHub token has the required permissions.", ephemeral=True)
+                return
+            elif repo_response.status >= 500:
+                await interaction.response.send_message("GitHub API is currently unavailable. Please try again later.", ephemeral=True)
+                return
+            elif repo_response.status != 200:
+                await interaction.response.send_message(f"An unexpected error occurred while checking the repository. HTTP status code: {repo_response.status}", ephemeral=True)
+                return
+
+        # Fetch the README.md file with the correct URL
+        async with session.get(f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/contents/README.md", headers=headers) as response:
+            if response.status == 404:
+                await interaction.response.send_message("The README.md file was not found in the repository. Please ensure it exists.", ephemeral=True)
+                return
+            elif response.status == 401:
+                await interaction.response.send_message("Unauthorized access. Please check if your GitHub token is valid.", ephemeral=True)
+                return
+            elif response.status == 403:
+                await interaction.response.send_message("Access to the repository is forbidden. Ensure your GitHub token has the required permissions.", ephemeral=True)
+                return
+            elif response.status >= 500:
+                await interaction.response.send_message("GitHub API is currently unavailable. Please try again later.", ephemeral=True)
+                return
+            elif response.status != 200:
+                await interaction.response.send_message(f"An unexpected error occurred. HTTP status code: {response.status}", ephemeral=True)
+                return
+
+        # Proceed if the README file is found
+        readme_data = await response.json()
+        readme_sha = readme_data['sha']
+        readme_content = readme_data['content']
+
+
+            
+        # If no errors occurred, proceed to process the response
+        readme_data = await response.json()
+        readme_sha = readme_data['sha']
+        readme_content = readme_data['content']
+
+
+    new_readme_content = f"{readme_content}\n- New Skin uploaded: {file.filename}\n"
+
+    # Update the README with new skin info
+    update_readme_payload = {
+        "message": "Update README with new skin",
+        "content": base64.b64encode(new_readme_content.encode('utf-8')).decode('utf-8'),
+        "sha": readme_sha
+    }
+
+    # Upload the new skin
+    upload_skin_payload = {
+        "message": commit_message,
+        "content": encoded_content,
+        "branch": BRANCH_NAME
+    }
+
+    # Update the README file
+    async with aiohttp.ClientSession() as session:
+        async with session.put(f"{GITHUB_API_URL}/repos/{REPO_OWNER}/{REPO_NAME}/contents/README.md", json=update_readme_payload, headers=headers) as response:
+            if response.status != 200:
+                await interaction.response.send_message("Failed to update README.", ephemeral=True)
+                return
+
+    # Upload the new skin file to GitHub
+    async with aiohttp.ClientSession() as session:
+        async with session.put(f"{GITHUB_API_URL}/repos/{REPO_OWNER}/{REPO_NAME}/contents/{github_file_path}", json=upload_skin_payload, headers=headers) as response:
+            if response.status != 201:
+                await interaction.response.send_message("Failed to upload the skin to Github.", ephemeral=True)
+                return
+
+    await interaction.response.send_message(f"Skin `{file.filename}` has been uploaded and added to the repository!")
+
+    # Clean up
+    os.remove(temp_path)
 
 # Run the bot with the provided token
 bot.run(os.getenv('BOT_TOKEN'))
